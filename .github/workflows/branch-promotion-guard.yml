@@ -1,0 +1,54 @@
+name: Branch Promotion Guard
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+jobs:
+  validate-promotion:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate branch promotion
+        run: |
+          set -e
+          BASE="${{ github.event.pull_request.base.ref }}"
+          HEAD="${{ github.event.pull_request.head.ref }}"
+
+          echo "Base branch: $BASE"
+          echo "Head branch: $HEAD"
+          REQUIRED=""
+
+          if [ "$BASE" = "pprd" ]; then
+            REQUIRED="quality"
+          elif [ "$BASE" = "main" ]; then
+            REQUIRED="pprd"
+          else
+            echo "No validation required for base branch $BASE"
+            exit 0
+          fi
+
+          echo "Required lower branch: $REQUIRED"
+          git fetch origin "$REQUIRED" || { echo "ERROR: failed to fetch $REQUIRED"; exit 1; }
+          git fetch origin "$HEAD"     || { echo "ERROR: failed to fetch $HEAD"; exit 1; }
+
+
+          # FAST PATH — ANCESTRY CHECK
+          if git merge-base --is-ancestor "origin/$HEAD" "origin/$REQUIRED"; then
+            echo "PASS: ancestry check succeeded"
+            exit 0
+          fi
+          echo "Ancestry check failed. Falling back to patch identity check..."
+
+          # PATCH IDENTITY CHECK
+          MERGE_BASE=$(git merge-base "origin/$REQUIRED" "origin/$HEAD")
+          MISSING=$(git cherry "origin/$REQUIRED" "origin/$HEAD" "$MERGE_BASE" | grep '^+' || true)
+          if [ -z "$MISSING" ]; then
+            echo "PASS: all patches exist in $REQUIRED"
+            exit 0
+          fi
+          
+          echo "FAIL: the following patches are missing from $REQUIRED:"
+          echo "$MISSING"
+          exit 1
